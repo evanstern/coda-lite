@@ -1,0 +1,5 @@
+/coda-lite
+/dist/
+*.test
+*.out
+.DS_Store
