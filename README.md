@@ -25,6 +25,30 @@ AI colleagues that learn your project — this.
 - Routing tables, ack/recv semantics, plugin host, daemon, SQLite.
 - Multi-user, multi-host, cross-runtime A2A. Single bash user, single host.
 
+## MCP server
+
+`coda-lite mcp serve` runs an MCP server on stdio that exposes the same
+operations as the CLI to opencode-running agents. New agents get this
+wired into their `opencode.json` automatically.
+
+Tools exposed (v0.2):
+
+- `coda_lite_inbox(agent)` — list unread messages
+- `coda_lite_msg(to, body, from?)` — send a message
+- `coda_lite_read(path)` — mark a message read
+
+- `coda_lite_agent_ls()` — list agents and tmux status
+- `coda_lite_agent_new(name)` — scaffold a new agent
+- `coda_lite_agent_spawn(name)` — start the tmux session
+- `coda_lite_agent_stop(name)` — kill the tmux session
+
+- `coda_lite_feature_ls()` — list active feature sessions
+- `coda_lite_feature_start(agent, slug, repo)` — worktree + tmux + scaffold
+- `coda_lite_feature_attach(agent, slug)` — open a tmux window in the agent's
+   session attached to the feature's worktree (so agents can spawn work and
+   then go work in it)
+- `coda_lite_feature_finish(slug)` — mark done, kill the feature session
+
 ## Quick start
 
 ```bash

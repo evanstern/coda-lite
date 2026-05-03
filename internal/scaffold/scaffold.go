@@ -19,6 +19,7 @@ func NewAgent(dir, name string) error {
 		"AGENTS.md":       agentsTemplate(name),
 		"wiki/index.md":   wikiIndexTemplate(name),
 		".coda-lite-meta": metaTemplate(name),
+		"opencode.json":   opencodeTemplate(),
 	}
 	for rel, content := range files {
 		path := filepath.Join(dir, rel)
@@ -71,6 +72,21 @@ name = "%s"
 harness = "opencode"
 created = "%s"
 `, name, time.Now().UTC().Format(time.RFC3339))) + "\n"
+}
+
+func opencodeTemplate() string {
+	return `{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["AGENTS.md"],
+  "mcp": {
+    "coda-lite": {
+      "type": "local",
+      "enabled": true,
+      "command": ["coda-lite", "mcp", "serve"]
+    }
+  }
+}
+`
 }
 
 func wikiIndexTemplate(name string) string {

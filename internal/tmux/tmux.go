@@ -44,3 +44,10 @@ func Attach(name string) error {
 	}
 	return syscall.Exec(binary, []string{"tmux", "attach", "-t", "=" + name}, os.Environ())
 }
+
+func NewWindow(session, name, dir string) error {
+	cmd := exec.Command("tmux", "new-window", "-t", "="+session, "-n", name, "-c", dir)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}

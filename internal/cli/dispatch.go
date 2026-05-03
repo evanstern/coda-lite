@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+
+	codalitemcp "github.com/evanstern/coda-lite/internal/mcp"
 )
 
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 func Dispatch(args []string) error {
 	cmd := args[0]
@@ -21,6 +24,8 @@ func Dispatch(args []string) error {
 		return runRead(rest)
 	case "feature":
 		return dispatchFeature(rest)
+	case "mcp":
+		return dispatchMCP(rest)
 	case "version", "--version", "-v":
 		fmt.Println(Version)
 		return nil
@@ -53,6 +58,18 @@ func dispatchAgent(args []string) error {
 		return runAgentRm(rest)
 	default:
 		return fmt.Errorf("agent: unknown subcommand: %s", sub)
+	}
+}
+
+func dispatchMCP(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("mcp: missing subcommand (serve)")
+	}
+	switch args[0] {
+	case "serve":
+		return codalitemcp.Serve(context.Background())
+	default:
+		return fmt.Errorf("mcp: unknown subcommand: %s", args[0])
 	}
 }
 

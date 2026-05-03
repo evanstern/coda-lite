@@ -34,6 +34,8 @@ Usage:
   coda-lite feature ls                                    list active feature sessions
   coda-lite feature finish <slug>                         end a feature session
 
+  coda-lite mcp serve                   run an MCP server on stdio (for opencode.json)
+
   coda-lite version                     print version
 
 The filesystem is the bus. Recipients poll their inbox; senders don't notify.

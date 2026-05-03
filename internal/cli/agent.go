@@ -241,18 +241,3 @@ func runAgentRm(args []string) error {
 	fmt.Printf("Removed agent %q (%s)\n", name, dir)
 	return nil
 }
-
-func validateName(name string) error {
-	if name == "" {
-		return fmt.Errorf("name cannot be empty")
-	}
-	for _, r := range name {
-		if r == '/' || r == '\\' || r == ' ' || r == '.' && len(name) <= 2 {
-			return fmt.Errorf("invalid name %q (no slashes, spaces, or dot-files)", name)
-		}
-	}
-	if strings.HasPrefix(name, ".") {
-		return fmt.Errorf("invalid name %q (no dot-files)", name)
-	}
-	return nil
-}
