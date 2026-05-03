@@ -91,7 +91,7 @@ func runInbox(args []string) error {
 	}
 	files := []os.DirEntry{}
 	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+		if e.IsDir() || !isInboxMessage(e.Name()) {
 			continue
 		}
 		files = append(files, e)
@@ -150,6 +150,19 @@ func senderFromName(filename string) string {
 	tail := filename[idx+len("-from-"):]
 	tail = strings.TrimSuffix(tail, ".md")
 	return tail
+}
+
+func isInboxMessage(filename string) bool {
+	if strings.HasPrefix(filename, ".") {
+		return false
+	}
+	if !strings.HasSuffix(filename, ".md") {
+		return false
+	}
+	if !strings.Contains(filename, "-from-") {
+		return false
+	}
+	return true
 }
 
 func sanitize(s string) string {

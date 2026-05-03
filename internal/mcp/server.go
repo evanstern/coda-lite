@@ -95,7 +95,7 @@ func toolInbox(ctx context.Context, req *mcpsdk.CallToolRequest, args AgentArgs)
 	}
 	out := InboxResult{Messages: []InboxMessage{}}
 	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+		if e.IsDir() || !isInboxMessage(e.Name()) {
 			continue
 		}
 		path := filepath.Join(inbox, e.Name())
@@ -110,6 +110,22 @@ func toolInbox(ctx context.Context, req *mcpsdk.CallToolRequest, args AgentArgs)
 	}
 	sort.Slice(out.Messages, func(i, j int) bool { return out.Messages[i].Timestamp < out.Messages[j].Timestamp })
 	return nil, out, nil
+}
+
+// isInboxMessage returns true only for files matching the coda-lite inbox
+// message convention: <UTC-ts>-from-<sender>.md. Anything else (dotfiles,
+// .prev/.read siblings, foreign artifacts) is ignored.
+func isInboxMessage(filename string) bool {
+	if strings.HasPrefix(filename, ".") {
+		return false
+	}
+	if !strings.HasSuffix(filename, ".md") {
+		return false
+	}
+	if !strings.Contains(filename, "-from-") {
+		return false
+	}
+	return true
 }
 
 type MsgArgs struct {
@@ -500,7 +516,7 @@ func toolFeatureAttach(ctx context.Context, req *mcpsdk.CallToolRequest, args Fe
 func parseInboxName(filename string) (timestamp, sender string) {
 	idx := strings.Index(filename, "-from-")
 	if idx < 0 {
-		return strings.TrimSuffix(filename, ".md"), ""
+		return "", ""
 	}
 	timestamp = filename[:idx]
 	sender = strings.TrimSuffix(filename[idx+len("-from-"):], ".md")
