@@ -53,6 +53,13 @@ func BareInit(opts BareInitOptions) (BareInitResult, error) {
 		in = os.Stdin
 	}
 
+	// Defensive empty-path check inside the core function so every
+	// caller (CLI, MCP tool, future programmatic uses) is protected.
+	// filepath.Abs("") silently resolves to the process CWD, which
+	// for a destructive migration is exactly the wrong default.
+	if strings.TrimSpace(opts.Path) == "" {
+		return BareInitResult{}, fmt.Errorf("path is required")
+	}
 	abs, err := filepath.Abs(opts.Path)
 	if err != nil {
 		return BareInitResult{}, fmt.Errorf("resolve path: %w", err)
@@ -203,10 +210,12 @@ func BareInit(opts BareInitOptions) (BareInitResult, error) {
 }
 
 // IsBareLayout reports whether path is a bare-layout project:
-// <path>/.bare/ is a real directory (not a symlink) and <path>/.git
-// is a regular file containing a gitdir pointer that resolves to
-// <path>/.bare. Symlinks for either entry are treated as not-a-
-// bare-layout, matching what BareInit will accept on migration.
+// <path>/.bare/ is a real directory (not a symlink) configured as
+// a bare git repository, and <path>/.git is a regular file
+// containing a gitdir pointer that resolves to <path>/.bare.
+// Symlinks for either entry, and non-bare .bare directories
+// (e.g. from `git init --separate-git-dir`), are treated as
+// not-a-bare-layout — matching what BareInit will accept.
 func IsBareLayout(path string) (bool, error) {
 	bare := filepath.Join(path, ".bare")
 	bareInfo, err := os.Lstat(bare)
@@ -246,7 +255,19 @@ func IsBareLayout(path string) (bool, error) {
 	if !filepath.IsAbs(resolved) {
 		resolved = filepath.Join(path, resolved)
 	}
-	return filepath.Clean(resolved) == filepath.Clean(bare), nil
+	if filepath.Clean(resolved) != filepath.Clean(bare) {
+		return false, nil
+	}
+	// Require .bare to actually be a bare git database. This rules
+	// out `git init --separate-git-dir .bare` (where .bare is a
+	// normal non-bare git dir that just happens to live next to a
+	// pointer file) and partial migrations that wrote the pointer
+	// before flipping core.bare.
+	out, err := exec.Command("git", "-C", bare, "rev-parse", "--is-bare-repository").Output()
+	if err != nil {
+		return false, nil
+	}
+	return strings.TrimSpace(string(out)) == "true", nil
 }
 
 // SuggestBareInitTarget returns a reasonable path to suggest as the

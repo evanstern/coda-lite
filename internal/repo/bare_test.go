@@ -357,6 +357,35 @@ func TestIsBareLayout_RejectsSymlinkBare(t *testing.T) {
 	}
 }
 
+func TestBareInit_RejectsEmptyPath(t *testing.T) {
+	for _, in := range []string{"", "   ", "\t", "\n"} {
+		_, err := BareInit(BareInitOptions{Path: in, Yes: true, Out: io.Discard})
+		if err == nil {
+			t.Fatalf("expected error for empty path %q", in)
+		}
+		if !strings.Contains(err.Error(), "path is required") {
+			t.Fatalf("for %q expected 'path is required', got: %v", in, err)
+		}
+	}
+}
+
+func TestIsBareLayout_RejectsSeparateGitDir(t *testing.T) {
+	// `git init --separate-git-dir .bare` produces .bare/ + .git
+	// pointer, both pointing the same way bare-layout does, but
+	// .bare is a normal (non-bare) git directory. Detection must
+	// not misclassify this as bare-layout.
+	dir := t.TempDir()
+	bare := filepath.Join(dir, ".bare")
+	mustRun(t, dir, "git", "init", "-q", "--separate-git-dir", bare, ".")
+	ok, err := IsBareLayout(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("--separate-git-dir layout should not be considered bare-layout")
+	}
+}
+
 func TestBareInit_RejectsBareRepo(t *testing.T) {
 	// Running bare-init on something that's already a bare git repo
 	// (not bare-layout, just `git init --bare`) should refuse.
