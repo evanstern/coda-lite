@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	codalitepaths "github.com/evanstern/coda-lite/internal/paths"
+	bareproj "github.com/evanstern/coda-lite/internal/repo"
 	"github.com/evanstern/coda-lite/internal/scaffold"
 	"github.com/evanstern/coda-lite/internal/tmux"
 
@@ -61,6 +63,10 @@ func Serve(ctx context.Context) error {
 	mcpsdk.AddTool(server,
 		&mcpsdk.Tool{Name: "coda_lite_feature_attach", Description: "Open a tmux window in the calling agent's session attached to the feature's worktree, so the agent can work in it."},
 		toolFeatureAttach)
+
+	mcpsdk.AddTool(server,
+		&mcpsdk.Tool{Name: "coda_lite_repo_bare_init", Description: "Convert a normal git clone into a bare-layout coda-lite project (.bare/ + worktree-per-branch). Validates cleanliness, prints a plan, and refuses without yes=true."},
+		toolRepoBareInit)
 
 	return server.Run(ctx, &mcpsdk.StdioTransport{})
 }
@@ -392,12 +398,19 @@ func toolFeatureStart(ctx context.Context, req *mcpsdk.CallToolRequest, args Fea
 	if err != nil {
 		return nil, FeatureStartResult{}, err
 	}
-	worktree := filepath.Join(filepath.Dir(repoAbs), filepath.Base(repoAbs)+"-"+args.Slug)
+	projectRoot, ok, err := bareproj.ResolveProjectRoot(repoAbs)
+	if err != nil {
+		return nil, FeatureStartResult{}, fmt.Errorf("resolve repo: %w", err)
+	}
+	if !ok {
+		return nil, FeatureStartResult{}, fmt.Errorf("repo at %s is not a bare-layout coda-lite project.\nrun: coda-lite repo bare-init %s", projectRoot, projectRoot)
+	}
+	worktree := filepath.Join(projectRoot, args.Slug)
 	if _, err := os.Stat(worktree); err == nil {
 		return nil, FeatureStartResult{}, fmt.Errorf("worktree already exists: %s", worktree)
 	}
 	branch := "feature/" + args.Slug
-	if out, err := exec.Command("git", "-C", repoAbs, "worktree", "add", worktree, "-b", branch).CombinedOutput(); err != nil {
+	if out, err := exec.Command("git", "-C", filepath.Join(projectRoot, ".bare"), "worktree", "add", worktree, "-b", branch).CombinedOutput(); err != nil {
 		return nil, FeatureStartResult{}, fmt.Errorf("git worktree add: %s: %w", string(out), err)
 	}
 	featureDir := filepath.Join(agentRoot, "features", args.Slug)
@@ -511,6 +524,40 @@ func toolFeatureAttach(ctx context.Context, req *mcpsdk.CallToolRequest, args Fe
 		return nil, FeatureAttachResult{}, err
 	}
 	return nil, FeatureAttachResult{WindowName: args.Slug, Worktree: worktree, OK: true}, nil
+}
+
+type RepoBareInitArgs struct {
+	Path string `json:"path" jsonschema:"absolute path to the project to migrate"`
+	Yes  bool   `json:"yes,omitempty" jsonschema:"skip the interactive confirmation prompt; required to perform the migration over MCP since there is no stdin"`
+}
+
+type RepoBareInitResult struct {
+	Path              string `json:"path"`
+	DefaultBranch     string `json:"default_branch"`
+	AlreadyBareLayout bool   `json:"already_bare_layout"`
+	Plan              string `json:"plan"`
+}
+
+func toolRepoBareInit(ctx context.Context, req *mcpsdk.CallToolRequest, args RepoBareInitArgs) (*mcpsdk.CallToolResult, RepoBareInitResult, error) {
+	if !args.Yes {
+		// MCP has no stdin for an interactive confirm. The CLI gets
+		// the prompt path; over MCP, callers must opt in explicitly.
+		return nil, RepoBareInitResult{}, fmt.Errorf("yes=true is required: bare-init is destructive and there is no interactive confirm over MCP")
+	}
+	res, err := bareproj.BareInit(bareproj.BareInitOptions{
+		Path: args.Path,
+		Yes:  true,
+		Out:  io.Discard,
+	})
+	if err != nil {
+		return nil, RepoBareInitResult{}, err
+	}
+	return nil, RepoBareInitResult{
+		Path:              res.Path,
+		DefaultBranch:     res.DefaultBranch,
+		AlreadyBareLayout: res.AlreadyBareLayout,
+		Plan:              res.Plan,
+	}, nil
 }
 
 func parseInboxName(filename string) (timestamp, sender string) {

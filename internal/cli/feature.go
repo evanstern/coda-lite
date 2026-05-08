@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	bareproj "github.com/evanstern/coda-lite/internal/repo"
 	"github.com/evanstern/coda-lite/internal/scaffold"
 	"github.com/evanstern/coda-lite/internal/tmux"
 )
@@ -42,13 +43,21 @@ func runFeatureStart(args []string) error {
 		return err
 	}
 
-	worktree := filepath.Join(filepath.Dir(repoAbs), filepath.Base(repoAbs)+"-"+slug)
+	projectRoot, ok, err := bareproj.ResolveProjectRoot(repoAbs)
+	if err != nil {
+		return fmt.Errorf("resolve repo: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("repo at %s is not a bare-layout coda-lite project.\nrun: coda-lite repo bare-init %s", projectRoot, projectRoot)
+	}
+
+	worktree := filepath.Join(projectRoot, slug)
 	if _, err := os.Stat(worktree); err == nil {
 		return fmt.Errorf("worktree path already exists: %s", worktree)
 	}
 
 	branch := "feature/" + slug
-	cmd := exec.Command("git", "-C", repoAbs, "worktree", "add", worktree, "-b", branch)
+	cmd := exec.Command("git", "-C", filepath.Join(projectRoot, ".bare"), "worktree", "add", worktree, "-b", branch)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
