@@ -278,13 +278,21 @@ func IsBareLayout(path string) (bool, error) {
 // migrate. On failure (path is not in a git repo at all) it returns
 // path unchanged so the caller can still produce a message.
 func SuggestBareInitTarget(path string) string {
-	out, err := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel").Output()
+	// `git -C <file>` fails, so when path points at a regular file
+	// we walk to its parent directory before asking git. Without
+	// this, the fallback would return the file path itself and
+	// produce a broken suggestion (`repo bare-init <some-file>`).
+	probe := path
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		probe = filepath.Dir(path)
+	}
+	out, err := exec.Command("git", "-C", probe, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
-		return path
+		return probe
 	}
 	top := strings.TrimSpace(string(out))
 	if top == "" {
-		return path
+		return probe
 	}
 	return top
 }
@@ -467,8 +475,10 @@ func buildPlan(path, defaultBranch string) string {
 // quoteIfNeeded wraps s in single quotes when it contains whitespace
 // or shell metacharacters, so the plan's path renders unambiguously
 // for paths like `/home/me/My Project`. Bare paths stay bare so the
-// plan reads naturally for the common case. Single-quote chars in
-// the input are escaped using the standard `'\”` sequence.
+// plan reads naturally for the common case. Embedded single-quote
+// characters are escaped using the standard POSIX sequence: end the
+// current quoted run, emit an escaped quote, start a new quoted run
+// (`'` + `\'` + `'`).
 func quoteIfNeeded(s string) string {
 	if !strings.ContainsAny(s, " \t\n\"'\\$`*?(){}[]<>|&;#") {
 		return s

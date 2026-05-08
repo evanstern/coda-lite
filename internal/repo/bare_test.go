@@ -238,6 +238,16 @@ func TestSuggestBareInitTarget_FallsBackToInput(t *testing.T) {
 	}
 }
 
+func TestSuggestBareInitTarget_AcceptsFilePath(t *testing.T) {
+	dir := initRepo(t, true)
+	file := filepath.Join(dir, "README.md")
+	got := SuggestBareInitTarget(file)
+	// Must resolve to the toplevel, not echo the file path back.
+	if evalOrSelf(t, got) != evalOrSelf(t, dir) {
+		t.Fatalf("file input: got=%s want toplevel=%s", got, dir)
+	}
+}
+
 func TestBareInit_RejectsPreExistingLinkedWorktrees(t *testing.T) {
 	dir := initRepo(t, true)
 	other := filepath.Join(t.TempDir(), "linked")
