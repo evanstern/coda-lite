@@ -24,6 +24,8 @@ func Dispatch(args []string) error {
 		return runRead(rest)
 	case "feature":
 		return dispatchFeature(rest)
+	case "repo":
+		return dispatchRepo(rest)
 	case "mcp":
 		return dispatchMCP(rest)
 	case "version", "--version", "-v":
@@ -87,5 +89,18 @@ func dispatchFeature(args []string) error {
 		return runFeatureFinish(rest)
 	default:
 		return fmt.Errorf("feature: unknown subcommand: %s", sub)
+	}
+}
+
+func dispatchRepo(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("repo: missing subcommand (bare-init)")
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "bare-init":
+		return runRepoBareInit(rest)
+	default:
+		return fmt.Errorf("repo: unknown subcommand: %s", sub)
 	}
 }

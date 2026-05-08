@@ -49,6 +49,9 @@ Tools exposed (v0.2):
    then go work in it)
 - `coda_lite_feature_finish(slug)` — mark done, kill the feature session
 
+- `coda_lite_repo_bare_init(path, yes)` — convert a normal clone into a
+   bare-layout coda-lite project (see "Repo layout" below)
+
 ## Quick start
 
 ```bash
@@ -89,6 +92,43 @@ coda-lite read ~/agents/zach/inbox/2026-05-01T14:30:00-from-evan.md
     features/           # active worktree-backed feature sessions
     .coda-lite-meta     # name, harness, created
 ```
+
+## Repo layout for feature sessions
+
+`coda-lite feature start` requires the target repo to use the
+**bare-layout** convention: a `.bare/` directory holding the git
+database, a `.git` pointer file at the project root, and a registered
+worktree per branch as siblings inside the project directory.
+
+```
+~/projects/<repo>/
+  .bare/              # core.bare = true
+  .git                # text file: "gitdir: ./.bare"
+  <default-branch>/   # worktree on the default branch (e.g. main, master)
+  <slug>/             # worktree on feature/<slug>, added by `feature start`
+```
+
+This keeps `~/projects/` clean (one dir per project) and makes the
+project move-as-a-unit if you rsync or relocate.
+
+To convert an existing normal clone in place, run:
+
+```bash
+coda-lite repo bare-init ~/projects/<repo>
+```
+
+It validates that the working tree is clean, prints the migration
+plan, and requires `--yes` (or an interactive `y`) before touching
+anything. The default branch (whatever `git symbolic-ref refs/remotes/origin/HEAD`
+resolves to, falling back to the current branch) becomes the
+top-level worktree directory. It's idempotent — running it on an
+already-converted repo exits with no work. From that point on,
+`coda-lite feature start <agent> <slug> --repo ~/projects/<repo>`
+(or any path inside the project — `<repo>/<default-branch>`,
+`<repo>/.bare`) places the new worktree at `<repo>/<slug>`.
+
+`feature start` against a non-bare-layout repo refuses with a
+pointer to `repo bare-init`.
 
 ## Design
 

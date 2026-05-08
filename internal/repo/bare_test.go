@@ -1,0 +1,651 @@
+package repo
+
+import (
+	"bytes"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// initRepo creates a minimal git repo with one commit on `main` and
+// optionally a configured origin/HEAD pointing at main. Returns the
+// repo path.
+func initRepo(t *testing.T, withOriginHead bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	mustRun(t, dir, "git", "init", "-q", "-b", "main", ".")
+	mustRun(t, dir, "git", "config", "user.email", "test@example.com")
+	mustRun(t, dir, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "subpkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "subpkg", "x.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "git", "add", ".")
+	mustRun(t, dir, "git", "commit", "-q", "-m", "init")
+	if withOriginHead {
+		// Point origin/HEAD at main without an actual remote.
+		// `git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main`
+		// requires the target ref to exist, so create a stub.
+		mustRun(t, dir, "git", "update-ref", "refs/remotes/origin/main", "HEAD")
+		mustRun(t, dir, "git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	}
+	return dir
+}
+
+func mustRun(t *testing.T, dir, name string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%s %v: %v\n%s", name, args, err, string(out))
+	}
+}
+
+func TestBareInit_HappyPath(t *testing.T) {
+	dir := initRepo(t, true)
+
+	res, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err != nil {
+		t.Fatalf("BareInit: %v", err)
+	}
+	if res.AlreadyBareLayout {
+		t.Fatal("expected migration, got AlreadyBareLayout=true")
+	}
+	if res.DefaultBranch != "main" {
+		t.Fatalf("DefaultBranch = %q, want main", res.DefaultBranch)
+	}
+	if res.Plan == "" {
+		t.Fatal("expected non-empty Plan")
+	}
+
+	assertBareLayout(t, dir, "main")
+
+	// README and subpkg should now live under main/.
+	if _, err := os.Stat(filepath.Join(dir, "main", "README.md")); err != nil {
+		t.Fatalf("main/README.md missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "main", "subpkg", "x.txt")); err != nil {
+		t.Fatalf("main/subpkg/x.txt missing: %v", err)
+	}
+
+	// From within main/ git operates as a normal worktree.
+	if out, err := runOK(filepath.Join(dir, "main"), "git", "status", "--porcelain"); err != nil {
+		t.Fatalf("git status from main/: %v\n%s", err, out)
+	}
+	// And the bare repo itself is reachable for refs/objects from the
+	// project root (e.g. `git -C .bare log`), even though `git status`
+	// from the root won't work — there's no working tree there.
+	if out, err := runOK(filepath.Join(dir, ".bare"), "git", "log", "--oneline", "-1"); err != nil {
+		t.Fatalf("git log from .bare: %v\n%s", err, out)
+	}
+}
+
+func TestBareInit_FallbackToCurrentBranch(t *testing.T) {
+	// No origin/HEAD; should fall back to current branch.
+	dir := initRepo(t, false)
+
+	res, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err != nil {
+		t.Fatalf("BareInit: %v", err)
+	}
+	if res.DefaultBranch != "main" {
+		t.Fatalf("DefaultBranch = %q, want main", res.DefaultBranch)
+	}
+	assertBareLayout(t, dir, "main")
+}
+
+func TestBareInit_Idempotent(t *testing.T) {
+	dir := initRepo(t, true)
+	if _, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard}); err != nil {
+		t.Fatalf("first BareInit: %v", err)
+	}
+
+	var out bytes.Buffer
+	res, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: &out})
+	if err != nil {
+		t.Fatalf("second BareInit: %v", err)
+	}
+	if !res.AlreadyBareLayout {
+		t.Fatal("expected AlreadyBareLayout=true on second run")
+	}
+	if !strings.Contains(out.String(), "already a bare-layout") {
+		t.Fatalf("expected idempotent message, got: %q", out.String())
+	}
+}
+
+func TestBareInit_RejectsDirtyWorktree(t *testing.T) {
+	dir := initRepo(t, true)
+	if err := os.WriteFile(filepath.Join(dir, "dirty.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected error on dirty worktree")
+	}
+	if !strings.Contains(err.Error(), "not clean") {
+		t.Fatalf("expected 'not clean' error, got: %v", err)
+	}
+	// And the repo must be untouched.
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		t.Fatalf(".git should still exist after refusal: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".bare")); err == nil {
+		t.Fatal(".bare should not exist after refusal")
+	}
+}
+
+func TestBareInit_RejectsStashes(t *testing.T) {
+	dir := initRepo(t, true)
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "git", "stash", "push", "-q", "-m", "wip")
+
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected error when stashes present")
+	}
+	if !strings.Contains(err.Error(), "stashes") {
+		t.Fatalf("expected 'stashes' error, got: %v", err)
+	}
+}
+
+func TestBareInit_RejectsHalfState(t *testing.T) {
+	// .bare/ exists but no pointer file -> inconsistent half-state.
+	dir := initRepo(t, true)
+	if err := os.Mkdir(filepath.Join(dir, ".bare"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected error on half-state")
+	}
+	if !strings.Contains(err.Error(), "refusing to migrate") {
+		t.Fatalf("expected 'refusing to migrate' error, got: %v", err)
+	}
+}
+
+func TestBareInit_RejectsLinkedWorktree(t *testing.T) {
+	dir := initRepo(t, true)
+	wt := filepath.Join(t.TempDir(), "linked-wt")
+	mustRun(t, dir, "git", "worktree", "add", "-b", "branch1", wt)
+
+	_, err := BareInit(BareInitOptions{Path: wt, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected error on linked worktree")
+	}
+	if !strings.Contains(err.Error(), "linked worktree") {
+		t.Fatalf("expected 'linked worktree' error, got: %v", err)
+	}
+}
+
+func TestBareInit_RejectsFileBare(t *testing.T) {
+	dir := initRepo(t, true)
+	if err := os.WriteFile(filepath.Join(dir, ".bare"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected error on file-.bare")
+	}
+	if !strings.Contains(err.Error(), "exists as a file") {
+		t.Fatalf("expected 'exists as a file' error, got: %v", err)
+	}
+}
+
+func TestBareInit_RejectsSymlinkBare(t *testing.T) {
+	dir := initRepo(t, true)
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, ".bare")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected error on symlink-.bare")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected 'symlink' error, got: %v", err)
+	}
+}
+
+func TestSuggestBareInitTarget_ReturnsToplevel(t *testing.T) {
+	dir := initRepo(t, true)
+	deep := filepath.Join(dir, "subpkg")
+	got := SuggestBareInitTarget(deep)
+	if evalOrSelf(t, got) != evalOrSelf(t, dir) {
+		t.Fatalf("got=%s want=%s", got, dir)
+	}
+}
+
+func TestSuggestBareInitTarget_FallsBackToInput(t *testing.T) {
+	dir := t.TempDir()
+	got := SuggestBareInitTarget(dir)
+	if got != dir {
+		t.Fatalf("non-git path: got=%s want=%s", got, dir)
+	}
+}
+
+func TestSuggestBareInitTarget_AcceptsFilePath(t *testing.T) {
+	dir := initRepo(t, true)
+	file := filepath.Join(dir, "README.md")
+	got := SuggestBareInitTarget(file)
+	// Must resolve to the toplevel, not echo the file path back.
+	if evalOrSelf(t, got) != evalOrSelf(t, dir) {
+		t.Fatalf("file input: got=%s want toplevel=%s", got, dir)
+	}
+}
+
+func TestBareInit_RejectsPreExistingLinkedWorktrees(t *testing.T) {
+	dir := initRepo(t, true)
+	other := filepath.Join(t.TempDir(), "linked")
+	mustRun(t, dir, "git", "worktree", "add", "-b", "extra", other)
+
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected error when linked worktrees exist")
+	}
+	if !strings.Contains(err.Error(), "registered worktrees") {
+		t.Fatalf("expected 'registered worktrees' error, got: %v", err)
+	}
+	// Repo must be untouched.
+	if _, err := os.Stat(filepath.Join(dir, ".bare")); err == nil {
+		t.Fatal(".bare should not exist after refusal")
+	}
+}
+
+func TestBareInit_RejectsRemoteOnlyDefaultBranch(t *testing.T) {
+	// Clone-style: origin/HEAD points at a branch with no local ref.
+	dir := t.TempDir()
+	mustRun(t, dir, "git", "init", "-q", "-b", "feature", ".")
+	mustRun(t, dir, "git", "config", "user.email", "test@example.com")
+	mustRun(t, dir, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "git", "add", ".")
+	mustRun(t, dir, "git", "commit", "-q", "-m", "init")
+	// origin/main exists as a remote-tracking ref but there is no
+	// local refs/heads/main.
+	mustRun(t, dir, "git", "update-ref", "refs/remotes/origin/main", "HEAD")
+	mustRun(t, dir, "git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	// HEAD is on `feature` (which exists locally), so resolution
+	// should fall through origin/main and land on `feature`.
+	if err != nil {
+		t.Fatalf("expected fallback to local branch 'feature', got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "feature")); err != nil {
+		t.Fatalf("expected feature/ worktree, missing: %v", err)
+	}
+}
+
+func TestBareInit_RefusesWhenNoLocalDefaultBranch(t *testing.T) {
+	// origin/HEAD names a branch with no local ref AND HEAD is detached.
+	dir := t.TempDir()
+	mustRun(t, dir, "git", "init", "-q", "-b", "main", ".")
+	mustRun(t, dir, "git", "config", "user.email", "test@example.com")
+	mustRun(t, dir, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "git", "add", ".")
+	mustRun(t, dir, "git", "commit", "-q", "-m", "init")
+	// Detach HEAD.
+	mustRun(t, dir, "git", "checkout", "-q", "--detach")
+	// Delete the local main, then point origin/HEAD at it (so the
+	// remote-tracking ref still names `main` but no local exists).
+	mustRun(t, dir, "git", "branch", "-D", "main")
+	mustRun(t, dir, "git", "update-ref", "refs/remotes/origin/main", "HEAD")
+	mustRun(t, dir, "git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected refusal when no local default branch resolvable")
+	}
+	if !strings.Contains(err.Error(), "could not resolve default branch") {
+		t.Fatalf("expected 'could not resolve default branch' error, got: %v", err)
+	}
+}
+
+func TestBareInit_PlanQuotesPathsWithSpaces(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "My Project")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "git", "init", "-q", "-b", "main", ".")
+	mustRun(t, dir, "git", "config", "user.email", "test@example.com")
+	mustRun(t, dir, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "git", "add", ".")
+	mustRun(t, dir, "git", "commit", "-q", "-m", "init")
+
+	var buf bytes.Buffer
+	if _, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: &buf}); err != nil {
+		t.Fatalf("BareInit: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "'"+dir+"'") {
+		t.Fatalf("plan should quote path with spaces; output:\n%s", out)
+	}
+}
+
+func TestIsBareLayout_RejectsSymlinkBare(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "real-db")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, ".bare")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: ./.bare\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := IsBareLayout(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("symlink-.bare should not be considered bare-layout")
+	}
+}
+
+func TestBareInit_RejectsEmptyPath(t *testing.T) {
+	for _, in := range []string{"", "   ", "\t", "\n"} {
+		_, err := BareInit(BareInitOptions{Path: in, Yes: true, Out: io.Discard})
+		if err == nil {
+			t.Fatalf("expected error for empty path %q", in)
+		}
+		if !strings.Contains(err.Error(), "path is required") {
+			t.Fatalf("for %q expected 'path is required', got: %v", in, err)
+		}
+	}
+}
+
+func TestIsBareLayout_RejectsSeparateGitDir(t *testing.T) {
+	// `git init --separate-git-dir .bare` produces .bare/ + .git
+	// pointer, both pointing the same way bare-layout does, but
+	// .bare is a normal (non-bare) git directory. Detection must
+	// not misclassify this as bare-layout.
+	dir := t.TempDir()
+	bare := filepath.Join(dir, ".bare")
+	mustRun(t, dir, "git", "init", "-q", "--separate-git-dir", bare, ".")
+	ok, err := IsBareLayout(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("--separate-git-dir layout should not be considered bare-layout")
+	}
+}
+
+func TestBareInit_RejectsBareRepo(t *testing.T) {
+	// Running bare-init on something that's already a bare git repo
+	// (not bare-layout, just `git init --bare`) should refuse.
+	dir := t.TempDir()
+	mustRun(t, dir, "git", "init", "-q", "--bare", ".")
+
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected error on bare repo")
+	}
+}
+
+func TestBareInit_RequiresConfirmation(t *testing.T) {
+	dir := initRepo(t, true)
+
+	// Empty stdin -> aborts.
+	_, err := BareInit(BareInitOptions{
+		Path: dir,
+		Yes:  false,
+		In:   strings.NewReader("\n"),
+		Out:  io.Discard,
+	})
+	if err == nil {
+		t.Fatal("expected abort on empty answer")
+	}
+	if !strings.Contains(err.Error(), "aborted") {
+		t.Fatalf("expected 'aborted' error, got: %v", err)
+	}
+	// And the repo must be untouched.
+	if _, err := os.Stat(filepath.Join(dir, ".bare")); err == nil {
+		t.Fatal(".bare should not exist after abort")
+	}
+}
+
+func TestBareInit_AcceptsInteractiveYes(t *testing.T) {
+	dir := initRepo(t, true)
+	_, err := BareInit(BareInitOptions{
+		Path: dir,
+		Yes:  false,
+		In:   strings.NewReader("y\n"),
+		Out:  io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("BareInit with interactive yes: %v", err)
+	}
+	assertBareLayout(t, dir, "main")
+}
+
+func TestIsBareLayout_FalseOnNormalClone(t *testing.T) {
+	dir := initRepo(t, true)
+	ok, err := IsBareLayout(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("normal clone should not be bare-layout")
+	}
+}
+
+func TestResolveProjectRoot_AcceptsWorktreeAndBareDir(t *testing.T) {
+	dir := initRepo(t, true)
+	if _, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard}); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]string{
+		"project root":  dir,
+		"main worktree": filepath.Join(dir, "main"),
+		"bare dir":      filepath.Join(dir, ".bare"),
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, ok, err := ResolveProjectRoot(in)
+			if err != nil {
+				t.Fatalf("ResolveProjectRoot(%s): %v", in, err)
+			}
+			if !ok {
+				t.Fatalf("ResolveProjectRoot(%s): ok=false, want true", in)
+			}
+			// Compare via EvalSymlinks because t.TempDir on macOS goes
+			// through /var -> /private/var.
+			wantResolved := evalOrSelf(t, dir)
+			gotResolved := evalOrSelf(t, got)
+			if gotResolved != wantResolved {
+				t.Fatalf("ResolveProjectRoot(%s) = %s, want %s", in, gotResolved, wantResolved)
+			}
+		})
+	}
+}
+
+func TestBareInit_PreservesIgnoredFiles(t *testing.T) {
+	dir := initRepo(t, true)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("build/\nsecret.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "git", "add", ".gitignore")
+	mustRun(t, dir, "git", "commit", "-q", "-m", "ignore")
+	// Untracked-but-ignored files; clean tree from git's perspective.
+	if err := os.MkdirAll(filepath.Join(dir, "build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "build", "out.bin"), []byte("binary"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("api-key"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard}); err != nil {
+		t.Fatalf("BareInit: %v", err)
+	}
+
+	// Tracked files should be in main/ (git's checkout).
+	if _, err := os.Stat(filepath.Join(dir, "main", "README.md")); err != nil {
+		t.Fatalf("main/README.md missing: %v", err)
+	}
+	// Ignored files must have been merged from staging.
+	if _, err := os.Stat(filepath.Join(dir, "main", "secret.txt")); err != nil {
+		t.Fatalf("main/secret.txt (ignored) missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "main", "build", "out.bin")); err != nil {
+		t.Fatalf("main/build/out.bin (ignored) missing: %v", err)
+	}
+	// Staging dir must be cleaned up.
+	if _, err := os.Stat(filepath.Join(dir, ".coda-lite-bare-init-staging")); err == nil {
+		t.Fatal("staging dir leaked")
+	}
+}
+
+func TestBareInit_FeatureStartFlowAfterMigration(t *testing.T) {
+	dir := initRepo(t, true)
+	if _, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate what `feature start` does: resolve project root from
+	// some user-friendly input, then `git -C <root>/.bare worktree
+	// add <root>/<slug> -b feature/<slug>`.
+	for _, input := range []string{dir, filepath.Join(dir, "main"), filepath.Join(dir, ".bare")} {
+		root, ok, err := ResolveProjectRoot(input)
+		if err != nil || !ok {
+			t.Fatalf("ResolveProjectRoot(%s): ok=%v err=%v", input, ok, err)
+		}
+		// resolve symlinks for comparison; t.TempDir on macOS varies
+		if got, want := evalOrSelf(t, root), evalOrSelf(t, dir); got != want {
+			t.Fatalf("root=%s want=%s", got, want)
+		}
+	}
+
+	root, _, _ := ResolveProjectRoot(dir)
+	wt := filepath.Join(root, "x")
+	mustRun(t, root, "git", "-C", filepath.Join(root, ".bare"), "worktree", "add", wt, "-b", "feature/x")
+	if info, err := os.Stat(wt); err != nil || !info.IsDir() {
+		t.Fatalf("feature worktree at %s missing: %v", wt, err)
+	}
+	// And the worktree is sibling to main/, not to the project dir.
+	if filepath.Dir(wt) != root {
+		t.Fatalf("worktree placed outside project dir: %s", wt)
+	}
+}
+
+func TestResolveProjectRoot_FalseOnRandomDir(t *testing.T) {
+	dir := t.TempDir()
+	_, ok, err := ResolveProjectRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("random tempdir should not resolve to a bare-layout root")
+	}
+}
+
+func TestResolveProjectRoot_AcceptsDeepNestedPath(t *testing.T) {
+	dir := initRepo(t, true)
+	if _, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard}); err != nil {
+		t.Fatal(err)
+	}
+	deep := filepath.Join(dir, "main", "subpkg")
+	got, ok, err := ResolveProjectRoot(deep)
+	if err != nil {
+		t.Fatalf("ResolveProjectRoot(%s): %v", deep, err)
+	}
+	if !ok {
+		t.Fatalf("expected ok=true for deep path %s", deep)
+	}
+	if evalOrSelf(t, got) != evalOrSelf(t, dir) {
+		t.Fatalf("got=%s want=%s", got, dir)
+	}
+}
+
+func TestResolveProjectRoot_AcceptsFilePath(t *testing.T) {
+	dir := initRepo(t, true)
+	if _, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard}); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "main", "README.md")
+	got, ok, err := ResolveProjectRoot(file)
+	if err != nil {
+		t.Fatalf("ResolveProjectRoot(%s): %v", file, err)
+	}
+	if !ok {
+		t.Fatalf("expected ok=true for file path %s", file)
+	}
+	if evalOrSelf(t, got) != evalOrSelf(t, dir) {
+		t.Fatalf("got=%s want=%s", got, dir)
+	}
+}
+
+func evalOrSelf(t *testing.T, p string) string {
+	t.Helper()
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
+}
+
+func runOK(dir, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func assertBareLayout(t *testing.T, dir, defaultBranch string) {
+	t.Helper()
+	bare := filepath.Join(dir, ".bare")
+	info, err := os.Stat(bare)
+	if err != nil {
+		t.Fatalf(".bare/ missing: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal(".bare exists but is not a directory")
+	}
+	pointer := filepath.Join(dir, ".git")
+	body, err := os.ReadFile(pointer)
+	if err != nil {
+		t.Fatalf(".git pointer missing: %v", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(body)), "gitdir:") {
+		t.Fatalf(".git pointer body unexpected: %q", string(body))
+	}
+	wt := filepath.Join(dir, defaultBranch)
+	if info, err := os.Stat(wt); err != nil || !info.IsDir() {
+		t.Fatalf("worktree %s missing or not dir: %v", wt, err)
+	}
+	ok, err := IsBareLayout(dir)
+	if err != nil {
+		t.Fatalf("IsBareLayout: %v", err)
+	}
+	if !ok {
+		t.Fatal("IsBareLayout=false after migration")
+	}
+}
