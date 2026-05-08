@@ -390,7 +390,17 @@ func toolFeatureStart(ctx context.Context, req *mcpsdk.CallToolRequest, args Fea
 	if err := codalitepaths.ValidateName(args.Slug); err != nil {
 		return nil, FeatureStartResult{}, err
 	}
-	repoAbs, err := filepath.Abs(args.Repo)
+	// repo is required; an empty value would resolve via filepath.Abs
+	// to the MCP server's CWD and create a worktree in an unintended
+	// repository.
+	repo := strings.TrimSpace(args.Repo)
+	if repo == "" {
+		return nil, FeatureStartResult{}, fmt.Errorf("repo is required")
+	}
+	if !filepath.IsAbs(repo) {
+		return nil, FeatureStartResult{}, fmt.Errorf("repo must be absolute (got %q)", args.Repo)
+	}
+	repoAbs, err := filepath.Abs(repo)
 	if err != nil {
 		return nil, FeatureStartResult{}, err
 	}
@@ -403,7 +413,8 @@ func toolFeatureStart(ctx context.Context, req *mcpsdk.CallToolRequest, args Fea
 		return nil, FeatureStartResult{}, fmt.Errorf("resolve repo: %w", err)
 	}
 	if !ok {
-		return nil, FeatureStartResult{}, fmt.Errorf("repo at %s is not a bare-layout coda-lite project.\nrun: coda-lite repo bare-init %s", projectRoot, projectRoot)
+		suggest := bareproj.SuggestBareInitTarget(repoAbs)
+		return nil, FeatureStartResult{}, fmt.Errorf("repo at %s is not a bare-layout coda-lite project.\nrun: coda-lite repo bare-init %s", repoAbs, suggest)
 	}
 	worktree := filepath.Join(projectRoot, args.Slug)
 	if _, err := os.Stat(worktree); err == nil {

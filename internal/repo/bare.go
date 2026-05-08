@@ -77,12 +77,22 @@ func BareInit(opts BareInitOptions) (BareInitResult, error) {
 		return res, nil
 	}
 
-	// .bare/ present without a valid pointer file = inconsistent
-	// half-state. Refuse rather than overwrite.
-	if exists, err := dirExists(filepath.Join(abs, ".bare")); err != nil {
-		return res, err
-	} else if exists {
-		return res, fmt.Errorf("%s/.bare exists but the project is not a bare-layout repo; refusing to migrate (inspect manually)", abs)
+	// Anything named .bare that isn't a bare-layout database (we
+	// already returned early above when it was) is something we
+	// must not clobber. Use Lstat so we catch symlinks and regular
+	// files, not just directories.
+	bareEntry := filepath.Join(abs, ".bare")
+	if info, err := os.Lstat(bareEntry); err == nil {
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			return res, fmt.Errorf("%s/.bare exists as a symlink; refusing to clobber (inspect manually)", abs)
+		case !info.IsDir():
+			return res, fmt.Errorf("%s/.bare exists as a file; refusing to clobber (inspect manually)", abs)
+		default:
+			return res, fmt.Errorf("%s/.bare exists but the project is not a bare-layout repo; refusing to migrate (inspect manually)", abs)
+		}
+	} else if !os.IsNotExist(err) {
+		return res, fmt.Errorf("stat %s: %w", bareEntry, err)
 	}
 
 	if err := requireNormalCheckout(abs); err != nil {
@@ -231,6 +241,25 @@ func IsBareLayout(path string) (bool, error) {
 	return filepath.Clean(resolved) == filepath.Clean(bare), nil
 }
 
+// SuggestBareInitTarget returns a reasonable path to suggest as the
+// argument for `coda-lite repo bare-init` when the user pointed
+// `feature start` at something that is not (yet) a bare-layout
+// project. It runs `git rev-parse --show-toplevel` from path; on
+// success, that's the working-tree root the user likely wants to
+// migrate. On failure (path is not in a git repo at all) it returns
+// path unchanged so the caller can still produce a message.
+func SuggestBareInitTarget(path string) string {
+	out, err := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return path
+	}
+	top := strings.TrimSpace(string(out))
+	if top == "" {
+		return path
+	}
+	return top
+}
+
 // ResolveProjectRoot maps a user-friendly path to a bare-layout
 // project root. Accepts the project root itself, <root>/.bare, any
 // worktree under <root>, or any path nested inside one of those
@@ -270,17 +299,6 @@ func ResolveProjectRoot(path string) (string, bool, error) {
 	}
 }
 
-func dirExists(path string) (bool, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return info.IsDir(), nil
-}
-
 func requireNormalCheckout(path string) error {
 	insideOut, err := exec.Command("git", "-C", path, "rev-parse", "--is-inside-work-tree").CombinedOutput()
 	if err != nil {
@@ -315,6 +333,17 @@ func requireNormalCheckout(path string) error {
 	}
 	if abs != top {
 		return fmt.Errorf("%s is not the root of the working tree (root is %s)", abs, top)
+	}
+	// Refuse linked worktrees: their .git is a pointer file (or
+	// symlink) into the parent repo's .git/worktrees/<name>/, not
+	// a real git directory. Renaming that into .bare would orphan
+	// the parent repo and produce a half-migrated mess.
+	gitInfo, err := os.Lstat(filepath.Join(abs, ".git"))
+	if err != nil {
+		return fmt.Errorf("stat %s/.git: %w", abs, err)
+	}
+	if !gitInfo.IsDir() {
+		return fmt.Errorf("%s appears to be a linked worktree (.git is not a directory); run bare-init on the main repo instead", abs)
 	}
 	return nil
 }
@@ -363,8 +392,8 @@ func buildPlan(path, defaultBranch string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Plan for %s:\n", path)
 	fmt.Fprintf(&b, "  1. mv %s/.git -> %s/.bare; set core.bare=true\n", path, path)
-	fmt.Fprintf(&b, "  2. stage working-tree files aside\n")
-	fmt.Fprintf(&b, "  3. write %s/.git pointer (\"gitdir: ./.bare\")\n", path)
+	fmt.Fprintf(&b, "  2. write %s/.git pointer (\"gitdir: ./.bare\")\n", path)
+	fmt.Fprintf(&b, "  3. stage working-tree files aside\n")
 	fmt.Fprintf(&b, "  4. git -C %s/.bare worktree add %s/%s %s\n", path, path, defaultBranch, defaultBranch)
 	fmt.Fprintf(&b, "  5. merge gitignored/extra files from staging into %s/%s/\n", path, defaultBranch)
 	return b.String()

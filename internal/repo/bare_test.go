@@ -175,6 +175,69 @@ func TestBareInit_RejectsHalfState(t *testing.T) {
 	}
 }
 
+func TestBareInit_RejectsLinkedWorktree(t *testing.T) {
+	dir := initRepo(t, true)
+	wt := filepath.Join(t.TempDir(), "linked-wt")
+	mustRun(t, dir, "git", "worktree", "add", "-b", "branch1", wt)
+
+	_, err := BareInit(BareInitOptions{Path: wt, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected error on linked worktree")
+	}
+	if !strings.Contains(err.Error(), "linked worktree") {
+		t.Fatalf("expected 'linked worktree' error, got: %v", err)
+	}
+}
+
+func TestBareInit_RejectsFileBare(t *testing.T) {
+	dir := initRepo(t, true)
+	if err := os.WriteFile(filepath.Join(dir, ".bare"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected error on file-.bare")
+	}
+	if !strings.Contains(err.Error(), "exists as a file") {
+		t.Fatalf("expected 'exists as a file' error, got: %v", err)
+	}
+}
+
+func TestBareInit_RejectsSymlinkBare(t *testing.T) {
+	dir := initRepo(t, true)
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, ".bare")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected error on symlink-.bare")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected 'symlink' error, got: %v", err)
+	}
+}
+
+func TestSuggestBareInitTarget_ReturnsToplevel(t *testing.T) {
+	dir := initRepo(t, true)
+	deep := filepath.Join(dir, "subpkg")
+	got := SuggestBareInitTarget(deep)
+	if evalOrSelf(t, got) != evalOrSelf(t, dir) {
+		t.Fatalf("got=%s want=%s", got, dir)
+	}
+}
+
+func TestSuggestBareInitTarget_FallsBackToInput(t *testing.T) {
+	dir := t.TempDir()
+	got := SuggestBareInitTarget(dir)
+	if got != dir {
+		t.Fatalf("non-git path: got=%s want=%s", got, dir)
+	}
+}
+
 func TestBareInit_RejectsBareRepo(t *testing.T) {
 	// Running bare-init on something that's already a bare git repo
 	// (not bare-layout, just `git init --bare`) should refuse.

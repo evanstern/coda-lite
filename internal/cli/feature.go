@@ -48,7 +48,8 @@ func runFeatureStart(args []string) error {
 		return fmt.Errorf("resolve repo: %w", err)
 	}
 	if !ok {
-		return fmt.Errorf("repo at %s is not a bare-layout coda-lite project.\nrun: coda-lite repo bare-init %s", projectRoot, projectRoot)
+		suggest := bareproj.SuggestBareInitTarget(repoAbs)
+		return fmt.Errorf("repo at %s is not a bare-layout coda-lite project.\nrun: coda-lite repo bare-init %s", repoAbs, suggest)
 	}
 
 	worktree := filepath.Join(projectRoot, slug)
