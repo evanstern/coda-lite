@@ -65,7 +65,7 @@ func Serve(ctx context.Context) error {
 		toolFeatureAttach)
 
 	mcpsdk.AddTool(server,
-		&mcpsdk.Tool{Name: "coda_lite_repo_bare_init", Description: "Convert a normal git clone into a bare-layout coda-lite project (.bare/ + worktree-per-branch). Validates cleanliness, prints a plan, and refuses without yes=true."},
+		&mcpsdk.Tool{Name: "coda_lite_repo_bare_init", Description: "Convert a normal git clone into a bare-layout coda-lite project (.bare/ + worktree-per-branch). Validates cleanliness; the migration plan is returned in the response 'plan' field. Requires yes=true (no interactive confirm over MCP)."},
 		toolRepoBareInit)
 
 	return server.Run(ctx, &mcpsdk.StdioTransport{})
