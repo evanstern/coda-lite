@@ -238,6 +238,100 @@ func TestSuggestBareInitTarget_FallsBackToInput(t *testing.T) {
 	}
 }
 
+func TestBareInit_RejectsPreExistingLinkedWorktrees(t *testing.T) {
+	dir := initRepo(t, true)
+	other := filepath.Join(t.TempDir(), "linked")
+	mustRun(t, dir, "git", "worktree", "add", "-b", "extra", other)
+
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected error when linked worktrees exist")
+	}
+	if !strings.Contains(err.Error(), "registered worktrees") {
+		t.Fatalf("expected 'registered worktrees' error, got: %v", err)
+	}
+	// Repo must be untouched.
+	if _, err := os.Stat(filepath.Join(dir, ".bare")); err == nil {
+		t.Fatal(".bare should not exist after refusal")
+	}
+}
+
+func TestBareInit_RejectsRemoteOnlyDefaultBranch(t *testing.T) {
+	// Clone-style: origin/HEAD points at a branch with no local ref.
+	dir := t.TempDir()
+	mustRun(t, dir, "git", "init", "-q", "-b", "feature", ".")
+	mustRun(t, dir, "git", "config", "user.email", "test@example.com")
+	mustRun(t, dir, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "git", "add", ".")
+	mustRun(t, dir, "git", "commit", "-q", "-m", "init")
+	// origin/main exists as a remote-tracking ref but there is no
+	// local refs/heads/main.
+	mustRun(t, dir, "git", "update-ref", "refs/remotes/origin/main", "HEAD")
+	mustRun(t, dir, "git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	// HEAD is on `feature` (which exists locally), so resolution
+	// should fall through origin/main and land on `feature`.
+	if err != nil {
+		t.Fatalf("expected fallback to local branch 'feature', got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "feature")); err != nil {
+		t.Fatalf("expected feature/ worktree, missing: %v", err)
+	}
+}
+
+func TestBareInit_RefusesWhenNoLocalDefaultBranch(t *testing.T) {
+	// origin/HEAD names a branch with no local ref AND HEAD is detached.
+	dir := t.TempDir()
+	mustRun(t, dir, "git", "init", "-q", "-b", "main", ".")
+	mustRun(t, dir, "git", "config", "user.email", "test@example.com")
+	mustRun(t, dir, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "git", "add", ".")
+	mustRun(t, dir, "git", "commit", "-q", "-m", "init")
+	// Detach HEAD.
+	mustRun(t, dir, "git", "checkout", "-q", "--detach")
+	// Delete the local main, then point origin/HEAD at it (so the
+	// remote-tracking ref still names `main` but no local exists).
+	mustRun(t, dir, "git", "branch", "-D", "main")
+	mustRun(t, dir, "git", "update-ref", "refs/remotes/origin/main", "HEAD")
+	mustRun(t, dir, "git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+	_, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard})
+	if err == nil {
+		t.Fatal("expected refusal when no local default branch resolvable")
+	}
+	if !strings.Contains(err.Error(), "could not resolve default branch") {
+		t.Fatalf("expected 'could not resolve default branch' error, got: %v", err)
+	}
+}
+
+func TestIsBareLayout_RejectsSymlinkBare(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "real-db")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, ".bare")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: ./.bare\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := IsBareLayout(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("symlink-.bare should not be considered bare-layout")
+	}
+}
+
 func TestBareInit_RejectsBareRepo(t *testing.T) {
 	// Running bare-init on something that's already a bare git repo
 	// (not bare-layout, just `git init --bare`) should refuse.

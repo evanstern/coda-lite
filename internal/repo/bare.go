@@ -101,6 +101,9 @@ func BareInit(opts BareInitOptions) (BareInitResult, error) {
 	if err := requireCleanWorktree(abs); err != nil {
 		return res, err
 	}
+	if err := requireNoLinkedWorktrees(abs); err != nil {
+		return res, err
+	}
 	defaultBranch, err := resolveDefaultBranch(abs)
 	if err != nil {
 		return res, err
@@ -200,16 +203,21 @@ func BareInit(opts BareInitOptions) (BareInitResult, error) {
 }
 
 // IsBareLayout reports whether path is a bare-layout project:
-// <path>/.bare/ is a directory and <path>/.git is a regular file
-// containing a gitdir pointer that resolves to <path>/.bare.
+// <path>/.bare/ is a real directory (not a symlink) and <path>/.git
+// is a regular file containing a gitdir pointer that resolves to
+// <path>/.bare. Symlinks for either entry are treated as not-a-
+// bare-layout, matching what BareInit will accept on migration.
 func IsBareLayout(path string) (bool, error) {
 	bare := filepath.Join(path, ".bare")
-	bareInfo, err := os.Stat(bare)
+	bareInfo, err := os.Lstat(bare)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("stat %s: %w", bare, err)
+	}
+	if bareInfo.Mode()&os.ModeSymlink != 0 {
+		return false, nil
 	}
 	if !bareInfo.IsDir() {
 		return false, nil
@@ -366,14 +374,43 @@ func requireCleanWorktree(path string) error {
 	return nil
 }
 
+// requireNoLinkedWorktrees refuses to migrate when the repo already
+// has additional worktrees registered. Renaming .git -> .bare would
+// invalidate those worktrees' pointer files (which reference the
+// pre-migration common dir), silently breaking other checkouts the
+// user might have outside the project dir.
+func requireNoLinkedWorktrees(path string) error {
+	out, err := exec.Command("git", "-C", path, "worktree", "list", "--porcelain").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git worktree list: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	// Porcelain format: each worktree is a block separated by a
+	// blank line, starting with `worktree <path>`. Count blocks.
+	blocks := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "worktree ") {
+			blocks++
+		}
+	}
+	if blocks > 1 {
+		return fmt.Errorf("repo has %d registered worktrees; bare-init would orphan the linked ones. remove or move them first:\n%s", blocks, strings.TrimRight(string(out), "\n"))
+	}
+	return nil
+}
+
 // resolveDefaultBranch: origin/HEAD -> current branch -> refuse.
+// Each candidate must also have a local ref (refs/heads/<name>);
+// `worktree add <dir> <name>` after the migration would fail
+// otherwise, leaving the repo half-migrated. This commonly hits
+// clones made with --single-branch --branch <other>, where
+// origin/HEAD names a branch that was never fetched locally.
 func resolveDefaultBranch(path string) (string, error) {
 	if out, err := exec.Command("git", "-C", path, "symbolic-ref", "refs/remotes/origin/HEAD").Output(); err == nil {
 		ref := strings.TrimSpace(string(out))
 		const prefix = "refs/remotes/origin/"
 		if strings.HasPrefix(ref, prefix) {
 			name := strings.TrimPrefix(ref, prefix)
-			if name != "" {
+			if name != "" && localBranchExists(path, name) {
 				return name, nil
 			}
 		}
@@ -381,11 +418,16 @@ func resolveDefaultBranch(path string) (string, error) {
 	out, err := exec.Command("git", "-C", path, "symbolic-ref", "--short", "HEAD").Output()
 	if err == nil {
 		name := strings.TrimSpace(string(out))
-		if name != "" {
+		if name != "" && localBranchExists(path, name) {
 			return name, nil
 		}
 	}
-	return "", fmt.Errorf("could not resolve default branch (origin/HEAD unset and HEAD detached)")
+	return "", fmt.Errorf("could not resolve default branch with a local ref (origin/HEAD unset or names a branch not fetched locally; HEAD detached)")
+}
+
+func localBranchExists(path, name string) bool {
+	err := exec.Command("git", "-C", path, "show-ref", "--verify", "--quiet", "refs/heads/"+name).Run()
+	return err == nil
 }
 
 func buildPlan(path, defaultBranch string) string {
