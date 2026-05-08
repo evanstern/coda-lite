@@ -431,14 +431,28 @@ func localBranchExists(path, name string) bool {
 }
 
 func buildPlan(path, defaultBranch string) string {
+	p := quoteIfNeeded(path)
+	br := quoteIfNeeded(defaultBranch)
 	var b strings.Builder
-	fmt.Fprintf(&b, "Plan for %s:\n", path)
-	fmt.Fprintf(&b, "  1. mv %s/.git -> %s/.bare; set core.bare=true\n", path, path)
-	fmt.Fprintf(&b, "  2. write %s/.git pointer (\"gitdir: ./.bare\")\n", path)
+	fmt.Fprintf(&b, "Plan for %s:\n", p)
+	fmt.Fprintf(&b, "  1. mv %s/.git -> %s/.bare; set core.bare=true\n", p, p)
+	fmt.Fprintf(&b, "  2. write %s/.git pointer (\"gitdir: ./.bare\")\n", p)
 	fmt.Fprintf(&b, "  3. stage working-tree files aside\n")
-	fmt.Fprintf(&b, "  4. git -C %s/.bare worktree add %s/%s %s\n", path, path, defaultBranch, defaultBranch)
-	fmt.Fprintf(&b, "  5. merge gitignored/extra files from staging into %s/%s/\n", path, defaultBranch)
+	fmt.Fprintf(&b, "  4. git -C %s/.bare worktree add %s/%s %s\n", p, p, br, br)
+	fmt.Fprintf(&b, "  5. merge gitignored/extra files from staging into %s/%s/\n", p, br)
 	return b.String()
+}
+
+// quoteIfNeeded wraps s in single quotes when it contains whitespace
+// or shell metacharacters, so the plan's path renders unambiguously
+// for paths like `/home/me/My Project`. Bare paths stay bare so the
+// plan reads naturally for the common case. Single-quote chars in
+// the input are escaped using the standard `'\”` sequence.
+func quoteIfNeeded(s string) string {
+	if !strings.ContainsAny(s, " \t\n\"'\\$`*?(){}[]<>|&;#") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func renderTree(path, defaultBranch string) string {

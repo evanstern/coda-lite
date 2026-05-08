@@ -311,6 +311,31 @@ func TestBareInit_RefusesWhenNoLocalDefaultBranch(t *testing.T) {
 	}
 }
 
+func TestBareInit_PlanQuotesPathsWithSpaces(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "My Project")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "git", "init", "-q", "-b", "main", ".")
+	mustRun(t, dir, "git", "config", "user.email", "test@example.com")
+	mustRun(t, dir, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "git", "add", ".")
+	mustRun(t, dir, "git", "commit", "-q", "-m", "init")
+
+	var buf bytes.Buffer
+	if _, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: &buf}); err != nil {
+		t.Fatalf("BareInit: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "'"+dir+"'") {
+		t.Fatalf("plan should quote path with spaces; output:\n%s", out)
+	}
+}
+
 func TestIsBareLayout_RejectsSymlinkBare(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(t.TempDir(), "real-db")
