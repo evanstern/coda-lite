@@ -347,6 +347,42 @@ func TestResolveProjectRoot_FalseOnRandomDir(t *testing.T) {
 	}
 }
 
+func TestResolveProjectRoot_AcceptsDeepNestedPath(t *testing.T) {
+	dir := initRepo(t, true)
+	if _, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard}); err != nil {
+		t.Fatal(err)
+	}
+	deep := filepath.Join(dir, "main", "subpkg")
+	got, ok, err := ResolveProjectRoot(deep)
+	if err != nil {
+		t.Fatalf("ResolveProjectRoot(%s): %v", deep, err)
+	}
+	if !ok {
+		t.Fatalf("expected ok=true for deep path %s", deep)
+	}
+	if evalOrSelf(t, got) != evalOrSelf(t, dir) {
+		t.Fatalf("got=%s want=%s", got, dir)
+	}
+}
+
+func TestResolveProjectRoot_AcceptsFilePath(t *testing.T) {
+	dir := initRepo(t, true)
+	if _, err := BareInit(BareInitOptions{Path: dir, Yes: true, Out: io.Discard}); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "main", "README.md")
+	got, ok, err := ResolveProjectRoot(file)
+	if err != nil {
+		t.Fatalf("ResolveProjectRoot(%s): %v", file, err)
+	}
+	if !ok {
+		t.Fatalf("expected ok=true for file path %s", file)
+	}
+	if evalOrSelf(t, got) != evalOrSelf(t, dir) {
+		t.Fatalf("got=%s want=%s", got, dir)
+	}
+}
+
 func evalOrSelf(t *testing.T, p string) string {
 	t.Helper()
 	if r, err := filepath.EvalSymlinks(p); err == nil {

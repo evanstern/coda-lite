@@ -539,13 +539,24 @@ type RepoBareInitResult struct {
 }
 
 func toolRepoBareInit(ctx context.Context, req *mcpsdk.CallToolRequest, args RepoBareInitArgs) (*mcpsdk.CallToolResult, RepoBareInitResult, error) {
+	// path is required and must be absolute. Empty path would
+	// otherwise resolve via filepath.Abs to the MCP server's CWD,
+	// which is almost certainly not what the caller meant for a
+	// destructive migration.
+	path := strings.TrimSpace(args.Path)
+	if path == "" {
+		return nil, RepoBareInitResult{}, fmt.Errorf("path is required")
+	}
+	if !filepath.IsAbs(path) {
+		return nil, RepoBareInitResult{}, fmt.Errorf("path must be absolute (got %q)", args.Path)
+	}
 	if !args.Yes {
 		// MCP has no stdin for an interactive confirm. The CLI gets
 		// the prompt path; over MCP, callers must opt in explicitly.
 		return nil, RepoBareInitResult{}, fmt.Errorf("yes=true is required: bare-init is destructive and there is no interactive confirm over MCP")
 	}
 	res, err := bareproj.BareInit(bareproj.BareInitOptions{
-		Path: args.Path,
+		Path: path,
 		Yes:  true,
 		Out:  io.Discard,
 	})

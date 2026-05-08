@@ -118,9 +118,12 @@ func BareInit(opts BareInitOptions) (BareInitResult, error) {
 		}
 	}
 
-	// Move .git -> .bare and flip core.bare. This makes the working
-	// tree at <abs>/ orphaned; we'll re-attach it as a worktree
-	// after staging files aside.
+	// Move .git -> .bare, flip core.bare, then write the .git pointer
+	// IMMEDIATELY. The pointer write order matters: if any later
+	// step (staging, worktree-add) fails, the on-disk state is at
+	// least a recognisable bare-layout (.bare/ + pointer), which our
+	// own IsBareLayout will accept and re-runs of bare-init will
+	// no-op rather than refuse with "inconsistent half-state".
 	gitDir := filepath.Join(abs, ".git")
 	bareDir := filepath.Join(abs, ".bare")
 	if err := os.Rename(gitDir, bareDir); err != nil {
@@ -128,6 +131,10 @@ func BareInit(opts BareInitOptions) (BareInitResult, error) {
 	}
 	if cout, err := exec.Command("git", "-C", bareDir, "config", "core.bare", "true").CombinedOutput(); err != nil {
 		return res, fmt.Errorf("set core.bare: %s: %w", strings.TrimSpace(string(cout)), err)
+	}
+	pointerPath := filepath.Join(abs, ".git")
+	if err := os.WriteFile(pointerPath, []byte("gitdir: ./.bare\n"), 0o644); err != nil {
+		return res, fmt.Errorf("write .git pointer: %w", err)
 	}
 
 	// `git worktree add` refuses to populate a non-empty directory,
@@ -148,7 +155,9 @@ func BareInit(opts BareInitOptions) (BareInitResult, error) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if name == ".bare" || name == filepath.Base(stagingDir) {
+		// Skip .bare/ (the database), .git (the pointer we just
+		// wrote), and the staging dir itself.
+		if name == ".bare" || name == ".git" || name == filepath.Base(stagingDir) {
 			continue
 		}
 		from := filepath.Join(abs, name)
@@ -156,11 +165,6 @@ func BareInit(opts BareInitOptions) (BareInitResult, error) {
 		if err := os.Rename(from, to); err != nil {
 			return res, fmt.Errorf("stage %s: %w", from, err)
 		}
-	}
-
-	pointerPath := filepath.Join(abs, ".git")
-	if err := os.WriteFile(pointerPath, []byte("gitdir: ./.bare\n"), 0o644); err != nil {
-		return res, fmt.Errorf("write .git pointer: %w", err)
 	}
 
 	if cout, err := exec.Command("git", "-C", bareDir, "worktree", "add", branchDir, defaultBranch).CombinedOutput(); err != nil {
@@ -228,33 +232,42 @@ func IsBareLayout(path string) (bool, error) {
 }
 
 // ResolveProjectRoot maps a user-friendly path to a bare-layout
-// project root. Accepts the project root itself, <root>/.bare, or
-// any worktree under <root>. Returns ok=false (with the absolute
-// form of the input) when no candidate qualifies.
+// project root. Accepts the project root itself, <root>/.bare, any
+// worktree under <root>, or any path nested inside one of those
+// (e.g. <root>/main/internal/foo). It walks up parents until it
+// finds a bare-layout root or hits the filesystem root. Returns
+// ok=false (with the absolute form of the input) when no ancestor
+// qualifies.
+//
+// If path points at a file rather than a directory, the search
+// starts from its parent.
 func ResolveProjectRoot(path string) (string, bool, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", false, err
 	}
-	info, err := os.Stat(abs)
-	if err != nil {
+	start := abs
+	if info, err := os.Stat(abs); err == nil && !info.IsDir() {
+		start = filepath.Dir(abs)
+	} else if err != nil {
 		return abs, false, err
 	}
-	if !info.IsDir() {
-		return abs, false, fmt.Errorf("%s is not a directory", abs)
-	}
 
-	candidates := []string{abs, filepath.Dir(abs)}
-	for _, c := range candidates {
-		ok, err := IsBareLayout(c)
+	cur := start
+	for {
+		ok, err := IsBareLayout(cur)
 		if err != nil {
 			return abs, false, err
 		}
 		if ok {
-			return c, true, nil
+			return cur, true, nil
 		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return abs, false, nil
+		}
+		cur = parent
 	}
-	return abs, false, nil
 }
 
 func dirExists(path string) (bool, error) {

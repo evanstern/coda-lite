@@ -104,7 +104,7 @@ worktree per branch as siblings inside the project directory.
 ~/projects/<repo>/
   .bare/              # core.bare = true
   .git                # text file: "gitdir: ./.bare"
-  main/               # worktree on the default branch
+  <default-branch>/   # worktree on the default branch (e.g. main, master)
   <slug>/             # worktree on feature/<slug>, added by `feature start`
 ```
 
@@ -119,11 +119,13 @@ coda-lite repo bare-init ~/projects/<repo>
 
 It validates that the working tree is clean, prints the migration
 plan, and requires `--yes` (or an interactive `y`) before touching
-anything. It's idempotent — running it on an already-converted repo
-exits with no work. From that point on, `coda-lite feature start
-<agent> <slug> --repo ~/projects/<repo>` (or any path inside the
-project — `<repo>/main`, `<repo>/.bare`) places the new worktree at
-`<repo>/<slug>`.
+anything. The default branch (whatever `git symbolic-ref refs/remotes/origin/HEAD`
+resolves to, falling back to the current branch) becomes the
+top-level worktree directory. It's idempotent — running it on an
+already-converted repo exits with no work. From that point on,
+`coda-lite feature start <agent> <slug> --repo ~/projects/<repo>`
+(or any path inside the project — `<repo>/<default-branch>`,
+`<repo>/.bare`) places the new worktree at `<repo>/<slug>`.
 
 `feature start` against a non-bare-layout repo refuses with a
 pointer to `repo bare-init`.
